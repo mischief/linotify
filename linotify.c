@@ -33,22 +33,24 @@
 #define INVALID_FD (-1)
 
 struct inotify_context {
+    int fd;
     char buffer[READ_BUFFER_SIZE];
-    int offset;
-    int bytes_remaining;
+    size_t length;
+    size_t offset;
 };
 
 void push_inotify_handle(lua_State *L, int fd)
 {
-    int *udata = (int *) lua_newuserdata(L, sizeof(int));
-    *udata = fd;
+    struct inotify_context *ctx = lua_newuserdata(L, sizeof(*ctx));
+    memset(ctx, 0, sizeof(*ctx));
+    ctx->fd = fd;
     luaL_getmetatable(L, MT_NAME);
     lua_setmetatable(L, -2);
 }
 
-int get_inotify_handle(lua_State *L, int index)
+struct inotify_context *get_inotify_handle(lua_State *L, int index)
 {
-    return *((int *) luaL_checkudata(L, index, MT_NAME));
+    return luaL_checkudata(L, index, MT_NAME);
 }
 
 static int handle_error(lua_State *L)
@@ -83,7 +85,7 @@ static int init(lua_State *L)
 
 static int handle_fileno(lua_State *L)
 {
-    lua_pushinteger(L, get_inotify_handle(L, 1));
+    lua_pushinteger(L, get_inotify_handle(L, 1)->fd);
     return 1;
 }
 
@@ -109,31 +111,39 @@ push_inotify_event(lua_State *L, struct inotify_event *ev)
 
 static int handle_read(lua_State *L)
 {
-    int fd;
+    struct inotify_context *context;
     int i = 0;
     int n = 1;
     ssize_t bytes;
+    size_t el;
     struct inotify_event *iev;
-    char buffer[1024];
 
-    fd = get_inotify_handle(L, 1);
-    if((bytes = read(fd, buffer, 1024)) < 0) {
+    context = get_inotify_handle(L, 1);
+
+    if((bytes = read(context->fd, context->buffer + context->length, sizeof(context->buffer) - context->length)) < 0) {
         if(errno == EAGAIN || errno == EWOULDBLOCK) {
             lua_newtable(L);
             return 1;
         }
         return handle_error(L);
     }
+
     lua_newtable(L);
 
-    while(bytes >= sizeof(struct inotify_event)) {
-        iev = (struct inotify_event *) (buffer + i);
+    context->length += bytes;
+
+    while(context->length >= sizeof(struct inotify_event)) {
+        iev = (struct inotify_event *) (context->buffer + i);
+        el = (sizeof(struct inotify_event) + iev->len);
+
+        if(el > context->length)
+            break;
 
         push_inotify_event(L, iev);
         lua_rawseti(L, -2, n++);
 
-        i += (sizeof(struct inotify_event) + iev->len);
-        bytes -= (sizeof(struct inotify_event) + iev->len);
+        i += el;
+        context->length -= el;
     }
 
     return 1;
@@ -144,28 +154,36 @@ handle_events_iterator(lua_State *L)
 {
     struct inotify_context *context;
     struct inotify_event *event;
-    int fd;
+    ssize_t bytes = 0;
+    size_t el;
 
-    fd      = get_inotify_handle(L, 1);
-    context = lua_touserdata(L, lua_upvalueindex(1));
+    context = get_inotify_handle(L, 1);
 
-    if(context->bytes_remaining < sizeof(struct inotify_event)) {
-        context->offset = 0;
-
-        if((context->bytes_remaining = read(fd, context->buffer, READ_BUFFER_SIZE)) < 0) {
+    if(context->length < sizeof(struct inotify_event)) {
+again:
+        if((bytes = read(context->fd, context->buffer + context->length, sizeof(context->buffer) - context->length)) < 0) {
             if(errno == EAGAIN || errno == EWOULDBLOCK) {
                 lua_pushnil(L);
                 return 1;
             }
             return luaL_error(L, "read error: %s\n", strerror(errno));
         }
-    }
-    event = (struct inotify_event *) (context->buffer + context->offset);
 
-    context->bytes_remaining -= (sizeof(struct inotify_event) + event->len);
-    context->offset          += (sizeof(struct inotify_event) + event->len);
+        context->length += bytes;
+    }
+
+    event = (struct inotify_event *) (context->buffer);
+
+    el = sizeof(struct inotify_event) + event->len;
+
+    if(context->length < el)
+        goto again;
 
     push_inotify_event(L, event);
+
+    memmove(context->buffer, context->buffer + el, context->length - el);
+
+    context->length -= el;
 
     return 1;
 }
@@ -197,21 +215,21 @@ static int handle_close(lua_State *L)
 
 static int handle_add_watch(lua_State *L)
 {
-    int fd;
+    struct inotify_context *ctx;
     int wd;
     int top;
     int i;
     const char *path;
     uint32_t mask = 0;
 
-    fd = get_inotify_handle(L, 1);
+    ctx = get_inotify_handle(L, 1);
     path = luaL_checkstring(L, 2);
     top = lua_gettop(L);
     for(i = 3; i <= top; i++) {
         mask |= luaL_checkinteger(L, i);
     }
 
-    if((wd = inotify_add_watch(fd, path, mask)) == -1) {
+    if((wd = inotify_add_watch(ctx->fd, path, mask)) == -1) {
         return handle_error(L);
     } else {
         lua_pushinteger(L, wd);
@@ -221,13 +239,13 @@ static int handle_add_watch(lua_State *L)
 
 static int handle_rm_watch(lua_State *L)
 {
-    int fd;
+    struct inotify_context *ctx;
     int wd;
 
-    fd = get_inotify_handle(L, 1);
+    ctx = get_inotify_handle(L, 1);
     wd = luaL_checkinteger(L, 2);
 
-    if(inotify_rm_watch(fd, wd) == -1) {
+    if(inotify_rm_watch(ctx->fd, wd) == -1) {
         return handle_error(L);
     }
     lua_pushboolean(L, 1);
