@@ -29,7 +29,7 @@
 #include <unistd.h>
 
 #define MT_NAME "INOTIFY_HANDLE"
-#define READ_BUFFER_SIZE 1024
+#define READ_BUFFER_SIZE 4096
 #define INVALID_FD (-1)
 
 struct inotify_context {
