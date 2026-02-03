@@ -7,6 +7,23 @@ Building
 
 To build `inotify.so`, simply type `make`.
 
+LuaRocks
+--------
+
+    luarocks install --local https://github.com/hoelzro/linotify/raw/refs/heads/master/inotify-0.5-1.rockspec
+
+### BSD
+
+On BSD, libinotify is required.
+
+#### OpenBSD
+
+OpenBSD stores libinotify separately from other libraries, so some extra flags are needed:
+
+    luarocks install --local INOTIFY_INCDIR="/usr/local/include/inotify" \
+        LDFLAGS="-L/usr/local/lib/inotify -linotify -Wl,-rpath /usr/local/lib/inotify" \
+        https://github.com/hoelzro/linotify/raw/refs/heads/master/inotify-0.5-1.rockspec
+
 Usage
 -----
 
